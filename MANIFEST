@@ -1,0 +1,10 @@
+bin/wannotate
+bin/whistory
+Changes
+lib/VCS/SnapshotCM/Tools.pm
+Makefile.PL
+MANIFEST
+META.yml			Module meta-data (added by MakeMaker)
+README
+t/load.t
+TODO
