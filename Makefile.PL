@@ -4,7 +4,7 @@
 # $Author: mhx $
 # $Date: 2004/09/05 16:25:01 +0200 $
 # $Revision: 5 $
-# $Snapshot: /VCS-SnapshotCM/0.01 $
+# $Snapshot: /VCS-SnapshotCM/0.02 $
 # $Source: /Makefile.PL $
 #
 ################################################################################

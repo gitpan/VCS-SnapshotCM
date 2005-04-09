@@ -1,5 +1,6 @@
 bin/wannotate
 bin/whistory
+ChangeLog
 Changes
 lib/VCS/SnapshotCM/Tools.pm
 Makefile.PL

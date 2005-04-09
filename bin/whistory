@@ -3,9 +3,9 @@
 #
 # $Project: /VCS-SnapshotCM $
 # $Author: mhx $
-# $Date: 2004/09/05 22:11:05 +0200 $
-# $Revision: 8 $
-# $Snapshot: /VCS-SnapshotCM/0.01 $
+# $Date: 2005/04/09 13:13:21 +0200 $
+# $Revision: 16 $
+# $Snapshot: /VCS-SnapshotCM/0.02 $
 # $Source: /bin/whistory $
 #
 ################################################################################
@@ -26,12 +26,13 @@ use Text::Wrap;
 use POSIX qw(strftime);
 
 my($NAME) = $0 =~ /([\w\.]+)$/;
-my $VERSION = ('$Snapshot: /VCS-SnapshotCM/0.01 $' =~ /([^\/\s]+)\s*\$$/)[0];
+my $VERSION = ('$Snapshot: /VCS-SnapshotCM/0.02 $' =~ /([^\/\s]+)\s*\$$/)[0];
 
 my %OPT = (
   'debug'          => 0,
   'changelog'      => 0,
   'reverse'        => 0,
+  'warnings'       => 0,
   'color'          => (exists $ENV{TERM} && $ENV{TERM} =~ /^(dt|x)term$/),
   'exclude'        => [],
   'exclude-regexp' => [],
@@ -49,6 +50,7 @@ GetOptions(\%OPT, qw(
   man
   version
   debug+
+  warnings+
   color!
 )) or pod2usage(2);
 
@@ -98,39 +100,38 @@ ENDHELP
   }
 }
 
-unless (defined $mapping) {
-  if (@ARGV < 2) {
-    die <<END;
+if (@ARGV < 2 and not defined $mapping) {
+  die <<END;
 *** You are not inside a mapped directory.
 Either go to a mapped directory, or specify two snapshots.
 END
-  }
+}
 
-  unless (exists $OPT{server}) {
-    my $m = $vcs->get_mapping(snapshot => $ARGV[0]);
-    if (defined $m) {
-      $m = $m->{server};
-    }
-    else {
-      $m = $vcs->guess_server_hostname;
-      unless (defined $m and $vcs->exists_snapshot(server => $m, snapshot => $ARGV[0])) {
-        die <<END;
-*** Cannot guess a server hostname.
-Specify a server hostname using the -h option.
-END
+my @snapshots = map { $vcs->guess_local(snapshot => $_) || $_ } @ARGV;
+
+if ($OPT{debug}) {
+  print Data::Dumper->Dump([\@snapshots], ['*snapshots']);
+}
+
+for my $ss1 (@snapshots) {
+  if (not ref $ss1) {
+    for my $ss2 (@snapshots) {
+      if (ref $ss2) {
+        my $ss = $ss1;
+        $ss1 = { %$ss2 };
+        $ss1->{snapshot} = $ss;
+        $ss1->{path}     = "$ss1->{project}/$ss";
+        last;
       }
     }
-    $OPT{server} = $m;
-  }
-}
-else {
-  unless (exists $OPT{server}) {
-    $OPT{server} = $mapping->{server};
   }
 }
 
+$OPT{server} ||= $snapshots[0]{server};
+
 my(%source, %target);
-($source{path}, $target{path}) = @ARGV == 2 ? @ARGV : (@ARGV, $mapping->{snapshot});
+($source{path}, $target{path}) = map { $_->{path} } @snapshots == 2
+                               ? @snapshots : (@snapshots, { path => $mapping->{snapshot} });
 
 @$_{qw( project snapshot )} = $vcs->split_snapshot_path($_->{path})
     for \%source, \%target;
@@ -164,14 +165,14 @@ if ($OPT{debug}) {
 
 $vcs->configure(server => $OPT{server}, project => $source{project});
 
-if ($target{snapshot} eq '-') {
+if ($target{snapshot} eq '.') {
   die <<END;
-*** Target snapshot cannot be '-'.
+*** Target snapshot cannot be '.'.
 END
 }
 
 for ($source{snapshot}, $target{snapshot}) {
-  $_ eq '-' || $vcs->exists_snapshot(snapshot => $_) or die <<END;
+  $_ eq '.' || $vcs->exists_snapshot(snapshot => $_) or die <<END;
 *** No snapshot '$_' in project '$source{project}'.
 END
 }
@@ -194,7 +195,7 @@ END
 ### all error checking is done, we should be safe now
 
 # get file list from both snapshots
-$_->{files} = $_->{snapshot} eq '-' ? {} : $vcs->get_files(snapshot => $_->{snapshot})
+$_->{files} = $_->{snapshot} eq '.' ? {} : $vcs->get_files(snapshot => $_->{snapshot})
     for \%source, \%target;
 
 my %files;
@@ -325,7 +326,10 @@ if ($OPT{changelog}) {
     my $title = "$date  $author  <$login>";
     if ($title   ne $current{title} or
         $comment ne $current{comment}) {
-      write_changelog(\%current);
+      write_changelog_entry(\%current);
+      if ($title ne $current{title}) {
+        write_changelog_title($title);
+      }
       $current{files} = [];
     }
     $current{title}   = $title;
@@ -335,17 +339,22 @@ if ($OPT{changelog}) {
         if @{$c->{changed_functions}};
     push @{$current{files}}, $filespec;
   }
-  write_changelog(\%current);
+  write_changelog_entry(\%current);
 }
 
-sub write_changelog
+sub write_changelog_title
+{
+  my $title = shift;
+  print "$title\n\n";
+}
+
+sub write_changelog_entry
 {
   my $log = shift;
   return unless @{$log->{files}};
   my $comment = $log->{comment};
   $comment =~ s/^/\t  /mg;
-  print "$log->{title}\n\n", wrap("\t", "\t  ", "* "
-        . join(", ", @{$log->{files}}) . ":\n"), $comment, "\n\n";
+  print wrap("\t", "\t  ", "* " . join(", ", @{$log->{files}}) . ":\n"), $comment, "\n\n";
 }
 
 sub colored
@@ -371,7 +380,9 @@ sub get_changed_function_names
     push @change_ranges, [ $1, $2 || $1 ]
         if /^\d+(?:,\d+)?[acd](\d+)(?:,(\d+))?/;
   }
-  warn "$file: warning: no changes found\n" unless @change_ranges;
+  if ($OPT{warnings} or $OPT{debug}) {
+    warn "$file: warning: no changes found\n" unless @change_ranges;
+  }
 
   my @functions;
   my @change_range = (0, 0);
@@ -401,10 +412,8 @@ sub get_changed_function_names
 # This function is adapted from a ChangeLog script by Darin Adler
 sub get_function_line_ranges
 {
-  my($file, $file_handle) = @_;
+  my($file, $fh) = @_;
   my @ranges;
-  my $in_comment = 0;
-  my $in_macro = 0;
   my $in_parentheses = 0;
   my $in_braces = 0;
   my $word = "";
@@ -413,46 +422,45 @@ sub get_function_line_ranges
   my $start = 0;
   my $name = "";
   local $_;
-  
-  while (<$file_handle>) {
-    # Handle continued multi-line comment.
-    if ($in_comment) {
-      next unless s!.*\*/!!;
-      $in_comment = 0;
-    }
 
-    # Handle continued macro.
-    if ($in_macro) {
-      $in_macro = 0 unless /\\$/;
-      next;
-    }
+  my $content = do { local $/; <$fh> };
 
-    # Handle start of macro (or any preprocessor directive).
-    if (/^\s*\#/) {
-      $in_macro = 1 if /^([^\\]|\\.)*\\$/;
-      next;
-    }
+  # get rid of preprocessor statements
+  $content =~ s{
+    ^ ( \s* \# (?: [^\r\n\\]* (?: \\[^\r\n] | \\(?:\r\n|[\r\n]) ) ) *
+                   [^\r\n]* )
+  }{
+    my $r = $1;
+    $r =~ s/.*//mg;
+    $r;
+  }egsmx;
 
-    # Handle comments and quoted text.
-    while (m! ( /\* | // | ['"] ) !x) {
-      my $match = $1;
-      if ($match eq "/*") {
-        unless (s!/\*.*?\*/!!) {
-          s!/\*.*!!;
-          $in_comment = 1;
-        }
-      }
-      elsif ($match eq "//") {
-        s!//.*!!;
-      }
-      else { # ' or "
-        unless (s!$match([^\\]|\\.)*?$match!!) {
-          warn "$file:$.: warning: mismatched quotes\n";
-          s!$match.*!!;
-        }
-      }
-    }
-    
+  # get rid of comments and strings
+  $content =~ s{
+    ([^"'/]+)
+    |
+    (
+      "[^"\\]*(?:\\.[^"\\]*)*"
+      |
+      '[^'\\]*(?:\\.[^'\\]*)*'
+      |
+      / (?:
+         \*[^*]*\*+(?:[^/*][^*]*\*+)* /
+         |
+         /[^\r\n]*
+        )
+    )
+  }{
+    my $r = $2;
+    $r =~ s/.*//mg if defined $r;
+    defined $1 ? $1 : $r;
+  }egsx;
+
+  my @lines = $content =~ /\G^(.*(?:\r\n|[\r\n]|\z))/mg;
+
+  for my $lineno (1 .. @lines) {
+    $_ = $lines[$lineno-1];
+
     # Find function names.
     while (m!(\w+|[(){};])!g) {
       # Open parenthesis.
@@ -488,7 +496,7 @@ sub get_function_line_ranges
         # End of an outer level set of braces.
         # This could be a function body.
         if (!$in_braces and $name) {
-          push @ranges, [ $start, $., $name ];
+          push @ranges, [ $start, $lineno, $name ];
           $name = "";
         }
 
@@ -511,14 +519,26 @@ sub get_function_line_ranges
         $potential_name = "";
       }
       unless ($potential_start) {
-        $potential_start = $.;
+        $potential_start = $lineno;
         $potential_name = "";
       }
     }
   }
 
-  warn "$file: warning: mismatched braces\n"      if $in_braces;
-  warn "$file: warning: mismatched parentheses\n" if $in_parentheses;
+  if ($OPT{warnings} or $OPT{debug}) {
+    warn "$file: warning: mismatched braces\n"      if $in_braces;
+    warn "$file: warning: mismatched parentheses\n" if $in_parentheses;
+  }
+
+  if ($OPT{debug} && @ranges) {
+    print STDERR "--- functions for $file ---\n";
+    print STDERR "  $_->[2] ($_->[0]-$_->[1])\n" for @ranges;
+  }
+
+  if ($in_braces or $in_parentheses) {
+    # we better don't risk returning crap...
+    return ();
+  }
 
   return @ranges;
 }
@@ -542,13 +562,14 @@ I<options>:
   -r, --reverse                   reverse history output
 
   --(no)color                     (don't) use colored output
+  --warnings                      print additional warnings
 
   -?, --help                      show this help
   --man                           show manpage
   --version                       print version information
 
 Inside a mapped directory I<target-snapshot> is optional.
-Use '-' for I<source-snapshot> if there's no source snapshot.
+Use '.' for I<source-snapshot> if there's no source snapshot.
 
 =head1 DESCRIPTION
 
@@ -586,6 +607,10 @@ Use or don't use color in the output. The default is chosen
 depending on your terminal. When piping the colored output
 into C<less>, you may need to use C<less -R> to display the
 colors correctly.
+
+=head2 C<--warnings>
+
+Enable printing of additional warnings.
 
 =head1 EXAMPLES
 

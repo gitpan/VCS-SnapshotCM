@@ -2,9 +2,9 @@
 #
 # $Project: /VCS-SnapshotCM $
 # $Author: mhx $
-# $Date: 2004/09/05 22:11:03 +0200 $
-# $Revision: 6 $
-# $Snapshot: /VCS-SnapshotCM/0.01 $
+# $Date: 2005/04/09 13:36:08 +0200 $
+# $Revision: 9 $
+# $Snapshot: /VCS-SnapshotCM/0.02 $
 # $Source: /lib/VCS/SnapshotCM/Tools.pm $
 #
 ################################################################################
@@ -55,9 +55,10 @@ use Carp;
 use File::Temp qw( mktemp );
 use IO::File;
 use Time::Local;
+use Data::Dumper;
 use vars qw( $VERSION );
 
-$VERSION = do { my @r = '$Snapshot: /VCS-SnapshotCM/0.01 $' =~ /(\d+\.\d+(?:_\d+)?)/; @r ? $r[0] : '9.99' };
+$VERSION = do { my @r = '$Snapshot: /VCS-SnapshotCM/0.02 $' =~ /(\d+\.\d+(?:_\d+)?)/; @r ? $r[0] : '9.99' };
 
 =head2 C<new> OPTION =E<gt> VALUE, ...
 
@@ -76,6 +77,8 @@ sub new
     snapshot => undef,
   }, $class;
   $self->configure(@_);
+  $self->_debug(1, "## perl version $] on $^O\n");
+  $self->_debug(2, Data::Dumper->Dump([$self], ['self']));
   return $self;
 }
 
@@ -190,16 +193,61 @@ sub guess_server_hostname
   for (@{$out->{stdout}}) {
     /Server:\s*(.*?)\s*$/ and $server{$1}++;
   }
-  if (keys %server > 1 and exists $opt{snapshot}) {
-    for (keys %server) {
+  my @servers = keys %server;
+
+  unless (@servers) {
+    my $out = $self->_run("sslist -P -t1");
+    my @servers = @{$out->{stdout}};
+    chomp @servers;
+  }
+
+  if (@servers > 1 and exists $opt{snapshot}) {
+    for (@servers) {
       $self->exists_snapshot(server => $_, snapshot => $opt{snapshot})
           and return $_;
     }
   }
-  return keys %server == 1 ? (keys %server)[0] : undef;
+  return wantarray ? @servers : @servers == 1 ? $servers[0] : undef;
 }
 
-=head2 C<exists_snapshot>
+=head2 C<guess_local> OPTION =E<gt> VALUE, ...
+
+Poorly named method that guesses local hostname
+and snapshot properties.
+
+=cut
+
+sub guess_local
+{
+  my $self = shift;
+  my(undef, %opt) = $self->_map_options([qw(*server[d] *snapshot[m])], @_);
+  my %rv;
+
+  my $map = $self->get_current_mapping;
+  $rv{mapping} = $map if defined $map;
+
+  my @servers = exists $opt{server} ? $opt{server}
+                                    : $self->guess_server_hostname;
+
+  for my $server (@servers) {
+    my @ss = ($opt{snapshot});
+    push @ss, "$map->{project}/$opt{snapshot}" if defined $map;
+
+    for my $snapshot (@ss) {
+      next unless $snapshot =~ m! ^/ !x;
+      if ($self->exists_snapshot(server => $server, snapshot => $snapshot)) {
+        $rv{server} = $server;
+        $rv{path}   = $snapshot;
+        @rv{qw(project snapshot)} = $self->split_snapshot_path($snapshot);
+        return \%rv;
+      }
+    }
+  }
+
+  return undef;
+}
+
+=head2 C<exists_snapshot> OPTION =E<gt> VALUE, ...
 
 Check if a snapshot exists.
 
@@ -210,14 +258,14 @@ sub exists_snapshot
   my $self = shift;
   my($arg, %opt) = $self->_map_options([qw(server[md] *snapshot[m])], @_);
   my $snapshot = $self->_expand_snapshot_path($opt{snapshot});
-  my $out = $self->_run("sslist -d -H $arg $snapshot");
+  my $out = $self->_run("sslist $arg -d -H $snapshot");
   for (@{$out->{stdout}}) {
     /^\s*\Q$snapshot\E\s*$/ and return 1;
   }
   return 0;
 }
 
-=head2 C<get_snapshots>
+=head2 C<get_snapshots> OPTION =E<gt> VALUE, ...
 
 Get list of snapshots for a project.
 
@@ -227,12 +275,12 @@ sub get_snapshots
 {
   my $self = shift;
   my($arg, %opt) = $self->_map_options([qw(server[md] *project[md])], @_);
-  my $out = $self->_run("sslist -H $arg $opt{project}");
+  my $out = $self->_run("sslist $arg -H -R $opt{project}");
   chomp @{$out->{stdout}};
   return @{$out->{stdout}};
 }
 
-=head2 C<get_files>
+=head2 C<get_files> OPTION =E<gt> VALUE, ...
 
 Get list of files for a snapshot.
 
@@ -257,7 +305,7 @@ sub get_files
   return \%f;
 }
 
-=head2 C<read_file>
+=head2 C<read_file> OPTION =E<gt> VALUE, ...
 
 Read a certain revision of a file from a snapshot.
 
@@ -271,7 +319,7 @@ sub read_file
   return @{$out->{stdout}};
 }
 
-=head2 C<open_file>
+=head2 C<open_file> OPTION =E<gt> VALUE, ...
 
 Get an IO::File reference to a certain revision of a file from a snapshot.
 
@@ -284,7 +332,7 @@ sub open_file
   $self->_open("wco -p -q $arg $opt{file}");
 }
 
-=head2 C<read_diff>
+=head2 C<read_diff> OPTION =E<gt> VALUE, ...
 
 Read the diff between two revisions of a file.
 
@@ -298,7 +346,7 @@ sub read_diff
   return @{$out->{stdout}};
 }
 
-=head2 C<open_diff>
+=head2 C<open_diff> OPTION =E<gt> VALUE, ...
 
 Get an IO::File reference to the diff between two revisions of a file.
 
@@ -311,7 +359,7 @@ sub open_diff
   $self->_open("wdiff $arg $opt{file}");
 }
 
-=head2 C<get_history>
+=head2 C<get_history> OPTION =E<gt> VALUE, ...
 
 Get history information for a file.
 
@@ -340,11 +388,56 @@ sub get_history
   };
 }
 
+=head2 C<split_snapshot_path> PATH
+
+Split a snapshot path into project and snapshot.
+
+=cut
+
+sub split_snapshot_path
+{
+  my($self, $path) = @_;
+  exists $self->{_pcache} or $self->rebuild_project_cache;
+  for my $p (@{$self->{_pcache}}) {
+    if ($path =~ m! ^ \Q$p->[0]\E / (.+) $ !x) {
+      return ($p->[0], $1);
+    }
+  }
+  return ($1, $2) if $path =~ m! ^ (/.*) / ([^/]+) $ !x;
+  return ('', $path);
+}
+
+=head2 C<rebuild_project_cache>
+
+Explicitly rebuild the project cache. The project cache is
+required for splitting snapshot paths correctly.
+
+=cut
+
+sub rebuild_project_cache
+{
+  my($self) = @_;
+  my @servers = defined $self->{server} ? $self->{server}
+                                        : $self->guess_server_hostname;
+  my @projects;
+  for my $s (@servers) {
+    my $out = $self->_run("sslist -h$s -H");
+    my @p = @{$out->{stdout}};
+    chomp @p;
+    push @projects, map { [$_ => $s] } @p;
+  }
+  $self->{_pcache} = [sort { length $b->[0] <=> length $a->[0] } @projects];
+}
+
 sub _map_options
 {
   Carp::cluck("Invalid arguments") if @_ % 2;
 
   my($self, $accept, %opts) = @_;
+
+  $self->_debug(1, "## _map_options([".join(", ", map qq{'$_'}, @$accept)."]".
+                   (@_>2 ? ", ".join(", ", map qq{'$_'}, @_[2..$#_]) : '').")\n");
+
   my $caller = (caller(1))[3];
   my %map = (
     server   => '-h{}',
@@ -361,6 +454,10 @@ sub _map_options
   my %process = (
     snapshot => sub { $self->_expand_snapshot_path(@_) },
   );
+
+  $self->_debug(2, Data::Dumper->Dump([$self, $accept, \%opts, \%default],
+                                      [qw(self accept *opts *default)]));
+
   my %pass;
   my @arg;
   my $more = 0;
@@ -398,13 +495,6 @@ sub _map_options
   }
   my $arg = join ' ', @arg;
   return wantarray ? ($arg, %opts, %pass) : $arg;
-}
-
-sub split_snapshot_path
-{
-  my($self, $path) = @_;
-  return ($1, $2) if $path =~ m! ^ (/.*) / ([^/]+) $ !x;
-  return ('', $path);
 }
 
 sub _expand_snapshot_path
@@ -506,7 +596,9 @@ sub _debug
 {
   my($self, $level, @args) = @_;
   if ($self->{debug} >= $level) {
-    print STDERR @args;
+    my $output = join '', @args;
+    $output =~ s/^/[$level] /mg;
+    print STDERR $output;
   }
 }
 
